@@ -1,5 +1,5 @@
 # Render Blueprint for the CureSync AI parser backend.
-# New + → Blueprint → connect this repo → paste GEMINI_API_KEY → Deploy.
+# New + → Blueprint → connect this repo → paste GEMINI_API_KEY + APP_KEY → Deploy.
 services:
   - type: web
     name: curesync-server
@@ -10,6 +10,8 @@ services:
     healthCheckPath: /health
     envVars:
       - key: GEMINI_API_KEY
-        sync: false # you paste this in the Render dashboard; never in the repo
+        sync: false
       - key: GEMINI_MODEL
         value: gemini-3.6-flash
+      - key: APP_KEY
+        sync: false # shared secret; must equal the app's EXPO_PUBLIC_APP_KEY
