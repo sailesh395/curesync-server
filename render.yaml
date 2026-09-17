@@ -1,0 +1,15 @@
+# Render Blueprint for the CureSync AI parser backend.
+# New + → Blueprint → connect this repo → paste GEMINI_API_KEY → Deploy.
+services:
+  - type: web
+    name: curesync-server
+    runtime: node
+    plan: free # sleeps after 15 min idle (~50s cold start); "starter" ($7/mo) = always-on
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false # you paste this in the Render dashboard; never in the repo
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
