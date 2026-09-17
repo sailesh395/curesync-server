@@ -22,6 +22,18 @@ try {
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 
+// Shared secret. The app sends it as x-app-key; without a match we reject so a leaked public URL
+// can't burn the Gemini quota. Unset (local dev) → the gate is open.
+// ponytail: a secret baked into the APK is extractable by a determined attacker; this stops
+// casual abuse only. Upgrade path: real per-user auth when there are accounts.
+const APP_KEY = process.env.APP_KEY || '';
+
+function requireAppKey(req, res, next) {
+  if (!APP_KEY) return next();
+  if (req.get('x-app-key') === APP_KEY) return next();
+  return res.status(401).json({ error: 'unauthorized' });
+}
+
 if (!API_KEY || API_KEY.includes('...') || API_KEY.includes('YOUR')) {
   console.error('\n⚠️  GEMINI_API_KEY is missing or still the placeholder.');
   console.error('   Get a free key at https://aistudio.google.com/apikey and put it in server/.env:');
@@ -89,7 +101,7 @@ const AUDIO_SYSTEM =
 
 app.get('/health', (_req, res) => res.json({ ok: true, model: MODEL }));
 
-app.post('/api/v1/prescriptions/parse', async (req, res) => {
+app.post('/api/v1/prescriptions/parse', requireAppKey, async (req, res) => {
   const { image, mimeType = 'image/png' } = req.body ?? {};
   if (!image || typeof image !== 'string') {
     return res.status(400).json({ error: 'image (base64) is required' });
@@ -129,7 +141,7 @@ app.post('/api/v1/prescriptions/parse', async (req, res) => {
   }
 });
 
-app.post('/api/v1/prescriptions/parse-audio', async (req, res) => {
+app.post('/api/v1/prescriptions/parse-audio', requireAppKey, async (req, res) => {
   const { audio, mimeType = 'audio/wav' } = req.body ?? {};
   if (!audio || typeof audio !== 'string') {
     return res.status(400).json({ error: 'audio (base64) is required' });
