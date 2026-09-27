@@ -4,8 +4,10 @@
 // trivially extractable.
 import express from 'express';
 import cors from 'cors';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { requestOtp, verifyOtp } from './otp.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,9 +42,67 @@ if (!API_KEY || API_KEY.includes('...') || API_KEY.includes('YOUR')) {
   console.error('   GEMINI_API_KEY=AIza...\n');
 }
 
+// --- Phone-OTP login (server-side; the client never decides "code correct") ---
+const otpStore = new Map(); // phone -> { hash, expiresAt, attempts, sentAt }
+
+// 10-digit Indian subscriber number (drop +91 / leading 0). Mirrors the app's validate.ts.
+function normalizePhone(raw) {
+  let d = String(raw ?? '').replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  return d;
+}
+
+// Deliver the code. With MSG91_AUTH_KEY set → real SMS; otherwise dev mode (log + let the route
+// echo the code so the pilot works before an SMS account exists). Throws only when a real provider
+// is configured and the send fails, so we never silently drop a production OTP.
+async function sendSms(phone, code) {
+  const key = process.env.MSG91_AUTH_KEY;
+  if (!key) {
+    console.log(`[dev-otp] +91${phone} -> ${code}`);
+    return { dev: true };
+  }
+  const r = await fetch('https://control.msg91.com/api/v5/flow', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', authkey: key },
+    body: JSON.stringify({
+      template_id: process.env.MSG91_TEMPLATE_ID,
+      recipients: [{ mobiles: `91${phone}`, otp: code }],
+    }),
+  });
+  if (!r.ok) throw new Error(`msg91 ${r.status}`);
+  return { dev: false };
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '15mb' })); // base64 PNGs are large
+
+app.post('/api/v1/auth/request-otp', requireAppKey, async (req, res) => {
+  const phone = normalizePhone(req.body?.phone);
+  if (!/^[6-9]\d{9}$/.test(phone)) return res.status(400).json({ error: 'bad_phone' });
+  const r = requestOtp(otpStore, phone);
+  if (!r.ok) return res.status(429).json({ error: r.error, retryIn: r.retryIn });
+  try {
+    const sent = await sendSms(phone, r.code);
+    // devCode is returned ONLY in dev mode (no SMS provider) so testers can log in without SMS.
+    res.json({ ok: true, expiresIn: r.expiresIn, ...(sent.dev ? { devCode: r.code } : {}) });
+  } catch (e) {
+    otpStore.delete(phone);
+    console.error('[request-otp] sms failed:', e?.message || e);
+    res.status(502).json({ error: 'sms_failed' });
+  }
+});
+
+app.post('/api/v1/auth/verify-otp', requireAppKey, (req, res) => {
+  const phone = normalizePhone(req.body?.phone);
+  const r = verifyOtp(otpStore, phone, req.body?.code);
+  if (!r.ok) return res.status(401).json({ error: r.error });
+  // Opaque session marker. ponytail: the AI routes are gated by x-app-key, not this token, so it
+  // needs no server-side verification yet; issue a signed JWT + verify it when endpoints go per-user.
+  const token = `otp_${phone}_${crypto.randomBytes(16).toString('hex')}`;
+  res.json({ ok: true, token, phone });
+});
 
 // Gemini structured-output schema (uppercase types, no additionalProperties).
 const SCHEMA = {
