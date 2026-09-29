@@ -121,15 +121,18 @@ const SCHEMA = {
         required: ['name', 'dosage', 'duration', 'timing'],
       },
     },
+    labTests: { type: 'STRING' }, // comma-separated lab/diagnostic tests written on the pad; '' if none
   },
-  required: ['medicines'],
+  required: ['medicines', 'labTests'],
 };
 
 const SYSTEM =
   'You digitise handwritten prescriptions from Indian clinics. Read the image and extract each ' +
   'medicine. Use standard Indian brand spellings. Dosage is often written as 1-0-1 ' +
-  '(morning-noon-night). Leave a field as an empty string rather than guessing when it is ' +
-  'illegible or absent. Only include medicines you can actually read.';
+  '(morning-noon-night). Also extract any lab or diagnostic tests written on the pad (e.g. CBC, ' +
+  'LFT, KFT, Lipid Profile, Chest X-Ray, USG) into labTests as a comma-separated string; use "" ' +
+  'if none are written. Leave a field as an empty string rather than guessing when it is ' +
+  'illegible or absent. Only include medicines and tests you can actually read.';
 
 const AUDIO_SCHEMA = {
   type: 'OBJECT',
@@ -157,7 +160,7 @@ const AUDIO_SCHEMA = {
 };
 
 const AUDIO_SYSTEM =
-  'You are an expert AI clinical scribe for Indian clinics. Listen to this doctor-patient ambient consultation audio or doctor dictation. Extract the clinical diagnosis, notes/advice, recommended lab/diagnostic tests (e.g. CBC, LFT, Chest X-Ray), body system category (General, Respiratory, GI, Cardio, Derma, ENT, Ortho), follow-up date (YYYY-MM-DD format if mentioned, or empty string), and all prescribed medicines with dosage (e.g. 1-0-1), duration (e.g. 5 days), and timing (e.g. After food). Use standard Indian brand spellings.';
+  'You are an expert AI clinical scribe for Indian clinics. Listen to this doctor-patient ambient consultation audio or doctor dictation. Extract the clinical diagnosis, notes/advice, recommended lab/diagnostic tests (e.g. CBC, LFT, Chest X-Ray), body system category (General, Respiratory, GI, Cardio, Derma, ENT, Ortho), follow-up date (YYYY-MM-DD format if mentioned, or empty string), and all prescribed medicines with dosage (e.g. 1-0-1), duration (e.g. 5 days), and timing (e.g. After food). Use standard Indian brand spellings. The consultation may be in Telugu, Hindi, or any Indian language mixed with English drug names — understand it regardless and always return the fields in English. IMPORTANT: never invent a dosage, duration, or timing the doctor did not actually say — leave that field as an empty string instead of guessing.';
 
 app.get('/health', (_req, res) => res.json({ ok: true, model: MODEL }));
 
@@ -192,7 +195,7 @@ app.post('/api/v1/prescriptions/parse', requireAppKey, async (req, res) => {
       return res.status(502).json({ error: 'parse_failed', status: r.status, detail });
     }
     // responseMimeType=json → the model's text part is a JSON string matching SCHEMA.
-    const text = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? '{"medicines":[]}';
+    const text = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? '{"medicines":[],"labTests":""}';
     res.json(JSON.parse(text));
   } catch (err) {
     const detail = err?.message || String(err);
