@@ -435,57 +435,79 @@ app.get('/api/v1/clinics/:id/queue', requireDb, async (req, res) => {
 });
 
 // Public booking web page (the QR target). No app install needed.
+// Patient booking page strings — English / Telugu / Hindi (patients in villages read te/hi, not en).
+const BOOK_STR = {
+  en: { pageTitle: 'Book appointment · CureSync', title: 'Book appointment', name: 'Your name', namePh: 'e.g. Ramesh Kumar', phone: 'Mobile (optional)', getToken: 'Get my token', yourToken: 'Your token', keepOpen: 'Keep this page open — your position updates automatically.', powered: 'Powered by CureSync', directions: '📍 Get directions', notFound: 'Clinic not found.', notAccepting: ' — not accepting bookings right now', enterName: 'Please enter your name.', bookFail: 'Could not book. Please try again.', next: 'You are next!', ahead: '{n} patient(s) ahead · now serving #{m}', loading: 'Loading…' },
+  te: { pageTitle: 'అపాయింట్‌మెంట్ బుక్ చేయండి · CureSync', title: 'అపాయింట్‌మెంట్ బుక్ చేయండి', name: 'మీ పేరు', namePh: 'ఉదా. రమేష్ కుమార్', phone: 'మొబైల్ (ఐచ్ఛికం)', getToken: 'నా టోకెన్ పొందండి', yourToken: 'మీ టోకెన్', keepOpen: 'ఈ పేజీని తెరిచి ఉంచండి — మీ స్థానం దానంతటదే నవీకరించబడుతుంది.', powered: 'CureSync ద్వారా', directions: '📍 దారి చూడండి', notFound: 'క్లినిక్ కనుగొనబడలేదు.', notAccepting: ' — ప్రస్తుతం బుకింగ్‌లు స్వీకరించడం లేదు', enterName: 'దయచేసి మీ పేరు నమోదు చేయండి.', bookFail: 'బుక్ చేయడం సాధ్యపడలేదు. దయచేసి మళ్లీ ప్రయత్నించండి.', next: 'మీరే తదుపరి!', ahead: 'మీకు ముందు {n} మంది · ప్రస్తుతం #{m} సేవలో', loading: 'లోడ్ అవుతోంది…' },
+  hi: { pageTitle: 'अपॉइंटमेंट बुक करें · CureSync', title: 'अपॉइंटमेंट बुक करें', name: 'आपका नाम', namePh: 'जैसे रमेश कुमार', phone: 'मोबाइल (वैकल्पिक)', getToken: 'मेरा टोकन लें', yourToken: 'आपका टोकन', keepOpen: 'इस पेज को खुला रखें — आपकी स्थिति अपने आप अपडेट होती रहती है।', powered: 'CureSync द्वारा संचालित', directions: '📍 रास्ता देखें', notFound: 'क्लिनिक नहीं मिला।', notAccepting: ' — अभी बुकिंग स्वीकार नहीं की जा रही', enterName: 'कृपया अपना नाम दर्ज करें।', bookFail: 'बुक नहीं हो सका। कृपया पुनः प्रयास करें।', next: 'अब आपकी बारी है!', ahead: 'आपसे पहले {n} मरीज़ · अभी #{m} देखा जा रहा है', loading: 'लोड हो रहा है…' },
+};
+
 app.get('/book/:id', (req, res) => {
   const id = String(req.params.id).replace(/[^a-zA-Z0-9-]/g, '');
   res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Book appointment · CureSync</title>
 <style>:root{--p:#6F73D2;--ink:#141A2E;--muted:#5A6485;--line:#E4E7F2;--bg:#F6F7FC}
-*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
-.wrap{max-width:440px;margin:0 auto;padding:28px 18px}
-h1{font-size:22px;margin:0 0 2px}.muted{color:var(--muted);font-size:14px}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);font-size:17px}
+.wrap{max-width:440px;margin:0 auto;padding:22px 18px 40px}
+h1{font-size:24px;margin:0 0 2px}.muted{color:var(--muted);font-size:15px}
+.langbar{display:flex;gap:8px;margin-bottom:14px}
+.lang{width:auto;height:44px;padding:0 16px;border-radius:22px;background:#fff;border:1px solid var(--line);color:var(--ink);font-size:16px;font-weight:600;margin:0}
+.lang.active{background:var(--p);color:#fff;border-color:var(--p)}
 .card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:16px}
-label{display:block;font-size:13px;font-weight:600;margin:12px 0 6px}
-input{width:100%;height:48px;border:1px solid var(--line);border-radius:12px;padding:0 14px;font-size:16px}
-button{width:100%;height:52px;border:0;border-radius:26px;background:var(--p);color:#fff;font-size:16px;font-weight:700;margin-top:18px}
-button:disabled{opacity:.5}.big{font-size:44px;font-weight:800;color:var(--p)}.row{display:flex;gap:16px;align-items:baseline}
-.ok{background:#E6F6F3;border:1px solid #12A594;border-radius:14px;padding:16px;margin-top:14px}
-.err{color:#F2506E;font-size:14px;margin-top:10px}</style></head>
+label{display:block;font-size:15px;font-weight:600;margin:14px 0 6px}
+input{width:100%;height:52px;border:1px solid var(--line);border-radius:12px;padding:0 14px;font-size:17px}
+button{width:100%;height:54px;border:0;border-radius:27px;background:var(--p);color:#fff;font-size:17px;font-weight:700;margin-top:18px}
+button:disabled{opacity:.5}.big{font-size:48px;font-weight:800;color:var(--p)}.row{display:flex;gap:16px;align-items:baseline}
+.ok{background:#E6F6F3;border:1px solid #12A594;border-radius:14px;padding:16px;margin-top:14px;font-size:17px}
+.err{color:#F2506E;font-size:15px;margin-top:10px}</style></head>
 <body><div class="wrap">
-<h1>Book appointment</h1><p class="muted" id="clinic">Loading…</p><div id="dir" style="margin-top:6px;font-size:13.5px"></div>
+<div class="langbar"><button type="button" class="lang" id="lang_en" onclick="setLang('en')">English</button><button type="button" class="lang" id="lang_te" onclick="setLang('te')">తెలుగు</button><button type="button" class="lang" id="lang_hi" onclick="setLang('hi')">हिंदी</button></div>
+<h1 id="h1">Book appointment</h1><p class="muted" id="clinic">Loading…</p><div id="dir" style="margin-top:6px;font-size:15px"></div>
 <div id="form" class="card" style="display:none">
-  <label>Your name</label><input id="name" placeholder="e.g. Ramesh Kumar">
-  <label>Mobile (optional)</label><input id="phone" inputmode="tel" placeholder="98765 43210">
+  <label id="lblName">Your name</label><input id="name" placeholder="e.g. Ramesh Kumar">
+  <label id="lblPhone">Mobile (optional)</label><input id="phone" inputmode="tel" placeholder="98765 43210">
   <button id="btn" onclick="book()">Get my token</button><div id="err" class="err"></div>
 </div>
 <div id="done" class="card" style="display:none">
-  <p class="muted">Your token</p><div class="row"><span class="big" id="tok"></span></div>
-  <div class="ok"><div id="pos"></div><div class="muted" id="eta" style="margin-top:4px"></div></div>
-  <p class="muted" style="margin-top:14px">Keep this page open — your position updates automatically.</p>
+  <p class="muted" id="yourToken">Your token</p><div class="row"><span class="big" id="tok"></span></div>
+  <div class="ok"><div id="pos"></div></div>
+  <p class="muted" id="keepOpen" style="margin-top:14px">Keep this page open — your position updates automatically.</p>
 </div>
-<p class="muted" style="text-align:center;margin-top:20px">Powered by CureSync</p>
+<p class="muted" id="powered" style="text-align:center;margin-top:24px">Powered by CureSync</p>
 </div>
 <script>
-const ID=${JSON.stringify(id)}, API='/api/v1/clinics/'+ID; let myTok=null;
-async function load(){try{const r=await fetch(API);const b=await r.json();if(!r.ok)throw 0;
-document.getElementById('clinic').textContent=b.clinic.name+(b.clinic.open_hours?' · '+b.clinic.open_hours:'');
+const ID=${JSON.stringify(id)}, API='/api/v1/clinics/'+ID, STR=${JSON.stringify(BOOK_STR)};
+let myTok=null, nowServing=0, clinic=null;
+let lang=(function(){try{var l=localStorage.getItem('cs_lang');return STR[l]?l:'en'}catch(e){return 'en'}})();
+function t(k){return (STR[lang]&&STR[lang][k])||STR.en[k]||k;}
+function el(id){return document.getElementById(id);}
+function renderClinic(){el('clinic').textContent=clinic.name+(clinic.open_hours?' · '+clinic.open_hours:'')+(clinic.is_accepting?'':t('notAccepting'));}
+function updatePos(){if(myTok==null)return;var ahead=Math.max(0,myTok-nowServing-1);
+el('pos').textContent=ahead===0?t('next'):t('ahead').replace('{n}',ahead).replace('{m}',nowServing);}
+function applyStatic(){document.title=t('pageTitle');el('h1').textContent=t('title');
+el('lblName').textContent=t('name');el('name').placeholder=t('namePh');
+el('lblPhone').textContent=t('phone');el('btn').textContent=t('getToken');
+el('yourToken').textContent=t('yourToken');el('keepOpen').textContent=t('keepOpen');el('powered').textContent=t('powered');
+var d=el('dirLink');if(d)d.textContent=t('directions');
+if(clinic)renderClinic();else el('clinic').textContent=t('loading');updatePos();}
+function markLang(){['en','te','hi'].forEach(function(c){var b=el('lang_'+c);if(b)b.className='lang'+(c===lang?' active':'');});}
+function setLang(l){if(!STR[l])return;lang=l;try{localStorage.setItem('cs_lang',l)}catch(e){};applyStatic();markLang();}
+async function load(){try{const r=await fetch(API);const b=await r.json();if(!r.ok)throw 0;clinic=b.clinic;renderClinic();
 var ml=b.clinic.maps_link, addr=b.clinic.address;
 var href=(ml&&/^https?:\\/\\//i.test(ml))?ml:(addr?'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(addr):'');
-if(href){var dir=document.getElementById('dir');var a=document.createElement('a');a.href=href;a.target='_blank';a.rel='noopener';a.style.cssText='color:#6F73D2;font-weight:600;text-decoration:none';a.textContent='📍 Get directions';dir.appendChild(a);if(addr){var s=document.createElement('span');s.style.color='#5A6485';s.textContent=' · '+addr;dir.appendChild(s);}}
-document.getElementById('form').style.display=b.clinic.is_accepting?'block':'none';
-if(!b.clinic.is_accepting)document.getElementById('clinic').textContent+=' — not accepting bookings right now';
-}catch(e){document.getElementById('clinic').textContent='Clinic not found.';}}
-async function book(){const name=document.getElementById('name').value.trim();const phone=document.getElementById('phone').value.trim();
-const err=document.getElementById('err');if(name.length<2){err.textContent='Please enter your name.';return;}
-document.getElementById('btn').disabled=true;err.textContent='';
+if(href){var dir=el('dir');var a=document.createElement('a');a.id='dirLink';a.href=href;a.target='_blank';a.rel='noopener';a.style.cssText='color:#6F73D2;font-weight:600;text-decoration:none';a.textContent=t('directions');dir.appendChild(a);if(addr){var s=document.createElement('span');s.style.color='#5A6485';s.textContent=' · '+addr;dir.appendChild(s);}}
+el('form').style.display=b.clinic.is_accepting?'block':'none';
+}catch(e){clinic=null;el('clinic').textContent=t('notFound');}}
+async function book(){const name=el('name').value.trim();const phone=el('phone').value.trim();
+const err=el('err');if(name.length<2){err.textContent=t('enterName');return;}
+el('btn').disabled=true;err.textContent='';
 try{const r=await fetch(API+'/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({patientName:name,patientPhone:phone})});
-const b=await r.json();if(!r.ok)throw new Error(b.error||'failed');myTok=b.token_number;
-document.getElementById('form').style.display='none';document.getElementById('done').style.display='block';
-document.getElementById('tok').textContent='#'+b.token_number;render(b.now_serving);poll();
-}catch(e){document.getElementById('btn').disabled=false;err.textContent='Could not book. Please try again.';}}
-function render(now){const ahead=Math.max(0,myTok-now-1);
-document.getElementById('pos').textContent=ahead===0?'You are next!':ahead+' patient(s) ahead · now serving #'+now;}
-async function poll(){try{const r=await fetch(API+'/queue');const b=await r.json();render(b.now_serving);}catch(e){}setTimeout(poll,20000);}
-load();
+const b=await r.json();if(!r.ok)throw new Error(b.error||'failed');myTok=b.token_number;nowServing=b.now_serving;
+el('form').style.display='none';el('done').style.display='block';
+el('tok').textContent='#'+b.token_number;updatePos();poll();
+}catch(e){el('btn').disabled=false;err.textContent=t('bookFail');}}
+async function poll(){try{const r=await fetch(API+'/queue');const b=await r.json();nowServing=b.now_serving;updatePos();}catch(e){}setTimeout(poll,20000);}
+markLang();applyStatic();load();
 </script></body></html>`);
 });
 
