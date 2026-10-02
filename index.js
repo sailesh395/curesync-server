@@ -5,6 +5,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
+import pg from 'pg';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { requestOtp, verifyOtp } from './otp.js';
@@ -34,6 +35,23 @@ function requireAppKey(req, res, next) {
   if (!APP_KEY) return next();
   if (req.get('x-app-key') === APP_KEY) return next();
   return res.status(401).json({ error: 'unauthorized' });
+}
+
+// --- Supabase Postgres (appointments). Lazy pool; booking routes 503 if it isn't configured, so
+// the AI/OTP server still boots without a DB. ---
+let _pool = null;
+function db() {
+  if (_pool) return _pool;
+  const url = process.env.SUPABASE_DB_URL;
+  if (!url) return null;
+  // ponytail: TLS on, CA verification relaxed (the Supabase pooler cert isn't in Node's default
+  // trust store). Traffic is encrypted; upgrade to pin Supabase's CA (ssl.ca) for full verification.
+  _pool = new pg.Pool({ connectionString: url, ssl: { rejectUnauthorized: false }, max: 4 });
+  return _pool;
+}
+function requireDb(req, res, next) {
+  if (!db()) return res.status(503).json({ error: 'appointments_not_configured' });
+  next();
 }
 
 if (!API_KEY || API_KEY.includes('...') || API_KEY.includes('YOUR')) {
@@ -290,6 +308,157 @@ app.post('/api/v1/prescriptions/parse-audio', requireAppKey, async (req, res) =>
     console.error('[parse-audio] failed:', detail);
     res.status(502).json({ error: 'parse_audio_failed', detail });
   }
+});
+
+// ===================== Appointments (OPD token queue) =====================
+
+// Race-safe next-token insert: concurrent books may compute the same MAX+1, hitting the
+// unique(clinic_id, booking_date, token_number) constraint (23505) — retry a few times.
+async function bookToken(pool, clinicId, name, phone) {
+  for (let i = 0; i < 6; i++) {
+    try {
+      const r = await pool.query(
+        `insert into bookings (clinic_id, token_number, patient_name, patient_phone)
+         values ($1, (select coalesce(max(token_number),0)+1 from bookings
+                      where clinic_id=$1 and booking_date=current_date), $2, $3)
+         returning token_number`,
+        [clinicId, name, phone || null],
+      );
+      return r.rows[0].token_number;
+    } catch (e) {
+      if (e.code === '23505') continue; // token taken by a concurrent book → retry
+      throw e;
+    }
+  }
+  throw new Error('token_contention');
+}
+
+// Doctor: create or update their clinic (one per doctor in v1).
+app.post('/api/v1/clinics', requireAppKey, requireDb, async (req, res) => {
+  const { doctorKey, name, address, phone, openHours, avgMinutes } = req.body ?? {};
+  if (!doctorKey || !name) return res.status(400).json({ error: 'doctorKey_and_name_required' });
+  const avg = Number.isFinite(+avgMinutes) && +avgMinutes > 0 ? Math.min(60, +avgMinutes) : 8;
+  try {
+    const ex = await db().query('select id from clinics where doctor_key=$1 limit 1', [doctorKey]);
+    const vals = [name, address || null, phone || null, openHours || null, avg];
+    const r = ex.rows[0]
+      ? await db().query(
+          `update clinics set name=$1,address=$2,phone=$3,open_hours=$4,avg_minutes_per_patient=$5,updated_at=now()
+           where id=$6 returning *`, [...vals, ex.rows[0].id])
+      : await db().query(
+          `insert into clinics (name,address,phone,open_hours,avg_minutes_per_patient,doctor_key)
+           values ($1,$2,$3,$4,$5,$6) returning *`, [...vals, doctorKey]);
+    res.json({ clinic: r.rows[0] });
+  } catch (e) { console.error('[clinics] ', e.message); res.status(500).json({ error: 'db_error' }); }
+});
+
+// Doctor: fetch their clinic.
+app.get('/api/v1/my-clinic', requireAppKey, requireDb, async (req, res) => {
+  const r = await db().query('select * from clinics where doctor_key=$1 limit 1', [String(req.query.doctorKey ?? '')]);
+  res.json({ clinic: r.rows[0] ?? null });
+});
+
+// Doctor: advance the queue to the next token (marks the previous one done).
+app.post('/api/v1/clinics/:id/advance', requireAppKey, requireDb, async (req, res) => {
+  try {
+    const r = await db().query('update clinics set now_serving=now_serving+1, updated_at=now() where id=$1 returning now_serving', [req.params.id]);
+    if (!r.rows[0]) return res.status(404).json({ error: 'no_clinic' });
+    await db().query(`update bookings set status='done' where clinic_id=$1 and booking_date=current_date and token_number < $2 and status='waiting'`, [req.params.id, r.rows[0].now_serving]);
+    res.json({ now_serving: r.rows[0].now_serving });
+  } catch (e) { console.error('[advance] ', e.message); res.status(500).json({ error: 'db_error' }); }
+});
+
+// Doctor: today's bookings (with patient names) for the queue screen.
+app.get('/api/v1/clinics/:id/bookings', requireAppKey, requireDb, async (req, res) => {
+  const r = await db().query(
+    `select token_number, patient_name, patient_phone, status from bookings
+     where clinic_id=$1 and booking_date=current_date order by token_number`, [req.params.id]);
+  res.json({ bookings: r.rows });
+});
+
+// --- Public (patient-facing; no app key) ---
+
+// Public clinic info + live queue summary (no patient PII).
+app.get('/api/v1/clinics/:id', requireDb, async (req, res) => {
+  try {
+    const c = await db().query('select id,name,address,open_hours,is_accepting,now_serving,avg_minutes_per_patient from clinics where id=$1', [req.params.id]);
+    if (!c.rows[0]) return res.status(404).json({ error: 'no_clinic' });
+    const w = await db().query(`select count(*)::int n from bookings where clinic_id=$1 and booking_date=current_date and status='waiting'`, [req.params.id]);
+    res.json({ clinic: c.rows[0], waiting: w.rows[0].n });
+  } catch (e) { console.error('[clinic get] ', e.message); res.status(500).json({ error: 'db_error' }); }
+});
+
+// Public: book a token.
+app.post('/api/v1/clinics/:id/book', requireDb, async (req, res) => {
+  const { patientName, patientPhone } = req.body ?? {};
+  if (!patientName || String(patientName).trim().length < 2) return res.status(400).json({ error: 'name_required' });
+  try {
+    const c = await db().query('select now_serving, is_accepting, avg_minutes_per_patient from clinics where id=$1', [req.params.id]);
+    if (!c.rows[0]) return res.status(404).json({ error: 'no_clinic' });
+    if (!c.rows[0].is_accepting) return res.status(409).json({ error: 'not_accepting' });
+    const token = await bookToken(db(), req.params.id, String(patientName).trim(), patientPhone);
+    const ahead = Math.max(0, token - c.rows[0].now_serving - 1);
+    res.json({ token_number: token, now_serving: c.rows[0].now_serving, ahead, est_minutes: ahead * c.rows[0].avg_minutes_per_patient });
+  } catch (e) { console.error('[book] ', e.message); res.status(500).json({ error: 'db_error' }); }
+});
+
+// Public: live queue status (for the patient to poll their position).
+app.get('/api/v1/clinics/:id/queue', requireDb, async (req, res) => {
+  const c = await db().query('select now_serving, is_accepting from clinics where id=$1', [req.params.id]);
+  if (!c.rows[0]) return res.status(404).json({ error: 'no_clinic' });
+  res.json({ now_serving: c.rows[0].now_serving, is_accepting: c.rows[0].is_accepting });
+});
+
+// Public booking web page (the QR target). No app install needed.
+app.get('/book/:id', (req, res) => {
+  const id = String(req.params.id).replace(/[^a-zA-Z0-9-]/g, '');
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Book appointment · CureSync</title>
+<style>:root{--p:#6F73D2;--ink:#141A2E;--muted:#5A6485;--line:#E4E7F2;--bg:#F6F7FC}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+.wrap{max-width:440px;margin:0 auto;padding:28px 18px}
+h1{font-size:22px;margin:0 0 2px}.muted{color:var(--muted);font-size:14px}
+.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:16px}
+label{display:block;font-size:13px;font-weight:600;margin:12px 0 6px}
+input{width:100%;height:48px;border:1px solid var(--line);border-radius:12px;padding:0 14px;font-size:16px}
+button{width:100%;height:52px;border:0;border-radius:26px;background:var(--p);color:#fff;font-size:16px;font-weight:700;margin-top:18px}
+button:disabled{opacity:.5}.big{font-size:44px;font-weight:800;color:var(--p)}.row{display:flex;gap:16px;align-items:baseline}
+.ok{background:#E6F6F3;border:1px solid #12A594;border-radius:14px;padding:16px;margin-top:14px}
+.err{color:#F2506E;font-size:14px;margin-top:10px}</style></head>
+<body><div class="wrap">
+<h1>Book appointment</h1><p class="muted" id="clinic">Loading…</p>
+<div id="form" class="card" style="display:none">
+  <label>Your name</label><input id="name" placeholder="e.g. Ramesh Kumar">
+  <label>Mobile (optional)</label><input id="phone" inputmode="tel" placeholder="98765 43210">
+  <button id="btn" onclick="book()">Get my token</button><div id="err" class="err"></div>
+</div>
+<div id="done" class="card" style="display:none">
+  <p class="muted">Your token</p><div class="row"><span class="big" id="tok"></span></div>
+  <div class="ok"><div id="pos"></div><div class="muted" id="eta" style="margin-top:4px"></div></div>
+  <p class="muted" style="margin-top:14px">Keep this page open — your position updates automatically.</p>
+</div>
+<p class="muted" style="text-align:center;margin-top:20px">Powered by CureSync</p>
+</div>
+<script>
+const ID=${JSON.stringify(id)}, API='/api/v1/clinics/'+ID; let myTok=null;
+async function load(){try{const r=await fetch(API);const b=await r.json();if(!r.ok)throw 0;
+document.getElementById('clinic').textContent=b.clinic.name+(b.clinic.open_hours?' · '+b.clinic.open_hours:'');
+document.getElementById('form').style.display=b.clinic.is_accepting?'block':'none';
+if(!b.clinic.is_accepting)document.getElementById('clinic').textContent+=' — not accepting bookings right now';
+}catch(e){document.getElementById('clinic').textContent='Clinic not found.';}}
+async function book(){const name=document.getElementById('name').value.trim();const phone=document.getElementById('phone').value.trim();
+const err=document.getElementById('err');if(name.length<2){err.textContent='Please enter your name.';return;}
+document.getElementById('btn').disabled=true;err.textContent='';
+try{const r=await fetch(API+'/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({patientName:name,patientPhone:phone})});
+const b=await r.json();if(!r.ok)throw new Error(b.error||'failed');myTok=b.token_number;
+document.getElementById('form').style.display='none';document.getElementById('done').style.display='block';
+document.getElementById('tok').textContent='#'+b.token_number;render(b.now_serving);poll();
+}catch(e){document.getElementById('btn').disabled=false;err.textContent='Could not book. Please try again.';}}
+function render(now){const ahead=Math.max(0,myTok-now-1);
+document.getElementById('pos').textContent=ahead===0?'You are next!':ahead+' patient(s) ahead · now serving #'+now;}
+async function poll(){try{const r=await fetch(API+'/queue');const b=await r.json();render(b.now_serving);}catch(e){}setTimeout(poll,20000);}
+load();
+</script></body></html>`);
 });
 
 const port = process.env.PORT || 8787;
