@@ -74,6 +74,32 @@ async function sendSms(phone, code) {
   return { dev: false };
 }
 
+// --- Email-OTP login (same OTP core, keyed by email; separate store from phone) ---
+const emailOtpStore = new Map();
+const isEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(e ?? '').trim());
+
+// Deliver the code by email. With RESEND_API_KEY set → real email via Resend; else dev mode (log +
+// let the route echo the code so the pilot works before an email provider exists).
+async function sendEmail(email, code) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    console.log(`[dev-otp] ${email} -> ${code}`);
+    return { dev: true };
+  }
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: process.env.RESEND_FROM || 'CureSync <onboarding@resend.dev>',
+      to: [email],
+      subject: 'Your CureSync verification code',
+      html: `<p>Your CureSync code is <b style="font-size:20px">${code}</b></p><p>It is valid for 5 minutes. If you didn't request it, ignore this email.</p>`,
+    }),
+  });
+  if (!r.ok) throw new Error(`resend ${r.status}`);
+  return { dev: false };
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '15mb' })); // base64 PNGs are large
@@ -102,6 +128,29 @@ app.post('/api/v1/auth/verify-otp', requireAppKey, (req, res) => {
   // needs no server-side verification yet; issue a signed JWT + verify it when endpoints go per-user.
   const token = `otp_${phone}_${crypto.randomBytes(16).toString('hex')}`;
   res.json({ ok: true, token, phone });
+});
+
+app.post('/api/v1/auth/request-email-otp', requireAppKey, async (req, res) => {
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  if (!isEmail(email)) return res.status(400).json({ error: 'bad_email' });
+  const r = requestOtp(emailOtpStore, email);
+  if (!r.ok) return res.status(429).json({ error: r.error, retryIn: r.retryIn });
+  try {
+    const sent = await sendEmail(email, r.code);
+    res.json({ ok: true, expiresIn: r.expiresIn, ...(sent.dev ? { devCode: r.code } : {}) });
+  } catch (e) {
+    emailOtpStore.delete(email);
+    console.error('[request-email-otp] send failed:', e?.message || e);
+    res.status(502).json({ error: 'email_failed' });
+  }
+});
+
+app.post('/api/v1/auth/verify-email-otp', requireAppKey, (req, res) => {
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  const r = verifyOtp(emailOtpStore, email, req.body?.code);
+  if (!r.ok) return res.status(401).json({ error: r.error });
+  const token = `otp_${email}_${crypto.randomBytes(16).toString('hex')}`;
+  res.json({ ok: true, token, email });
 });
 
 // Gemini structured-output schema (uppercase types, no additionalProperties).
