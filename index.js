@@ -54,6 +54,19 @@ function requireDb(req, res, next) {
   next();
 }
 
+// Idempotent schema migrations, run once at startup (service-role can ALTER). Keeps the live DB in
+// sync without a manual SQL step for each small change.
+async function migrate() {
+  const pool = db();
+  if (!pool) return;
+  try {
+    await pool.query('alter table clinics add column if not exists maps_link text');
+    console.log('[migrate] clinics up to date');
+  } catch (e) {
+    console.error('[migrate] ', e.message);
+  }
+}
+
 if (!API_KEY || API_KEY.includes('...') || API_KEY.includes('YOUR')) {
   console.error('\n⚠️  GEMINI_API_KEY is missing or still the placeholder.');
   console.error('   Get a free key at https://aistudio.google.com/apikey and put it in server/.env:');
@@ -347,19 +360,19 @@ async function bookToken(pool, clinicId, name, phone) {
 
 // Doctor: create or update their clinic (one per doctor in v1).
 app.post('/api/v1/clinics', requireAppKey, requireDb, async (req, res) => {
-  const { doctorKey, name, address, phone, openHours, avgMinutes } = req.body ?? {};
+  const { doctorKey, name, address, phone, openHours, avgMinutes, mapsLink } = req.body ?? {};
   if (!doctorKey || !name) return res.status(400).json({ error: 'doctorKey_and_name_required' });
   const avg = Number.isFinite(+avgMinutes) && +avgMinutes > 0 ? Math.min(60, +avgMinutes) : 8;
   try {
     const ex = await db().query('select id from clinics where doctor_key=$1 limit 1', [doctorKey]);
-    const vals = [name, address || null, phone || null, openHours || null, avg];
+    const vals = [name, address || null, phone || null, openHours || null, avg, mapsLink || null];
     const r = ex.rows[0]
       ? await db().query(
-          `update clinics set name=$1,address=$2,phone=$3,open_hours=$4,avg_minutes_per_patient=$5,updated_at=now()
-           where id=$6 returning *`, [...vals, ex.rows[0].id])
+          `update clinics set name=$1,address=$2,phone=$3,open_hours=$4,avg_minutes_per_patient=$5,maps_link=$6,updated_at=now()
+           where id=$7 returning *`, [...vals, ex.rows[0].id])
       : await db().query(
-          `insert into clinics (name,address,phone,open_hours,avg_minutes_per_patient,doctor_key)
-           values ($1,$2,$3,$4,$5,$6) returning *`, [...vals, doctorKey]);
+          `insert into clinics (name,address,phone,open_hours,avg_minutes_per_patient,maps_link,doctor_key)
+           values ($1,$2,$3,$4,$5,$6,$7) returning *`, [...vals, doctorKey]);
     res.json({ clinic: r.rows[0] });
   } catch (e) { console.error('[clinics] ', e.message); res.status(500).json({ error: 'db_error' }); }
 });
@@ -393,7 +406,7 @@ app.get('/api/v1/clinics/:id/bookings', requireAppKey, requireDb, async (req, re
 // Public clinic info + live queue summary (no patient PII).
 app.get('/api/v1/clinics/:id', requireDb, async (req, res) => {
   try {
-    const c = await db().query('select id,name,address,open_hours,is_accepting,now_serving,avg_minutes_per_patient from clinics where id=$1', [req.params.id]);
+    const c = await db().query('select id,name,address,open_hours,maps_link,is_accepting,now_serving,avg_minutes_per_patient from clinics where id=$1', [req.params.id]);
     if (!c.rows[0]) return res.status(404).json({ error: 'no_clinic' });
     const w = await db().query(`select count(*)::int n from bookings where clinic_id=$1 and booking_date=current_date and status='waiting'`, [req.params.id]);
     res.json({ clinic: c.rows[0], waiting: w.rows[0].n });
@@ -438,7 +451,7 @@ button:disabled{opacity:.5}.big{font-size:44px;font-weight:800;color:var(--p)}.r
 .ok{background:#E6F6F3;border:1px solid #12A594;border-radius:14px;padding:16px;margin-top:14px}
 .err{color:#F2506E;font-size:14px;margin-top:10px}</style></head>
 <body><div class="wrap">
-<h1>Book appointment</h1><p class="muted" id="clinic">Loading…</p>
+<h1>Book appointment</h1><p class="muted" id="clinic">Loading…</p><div id="dir" style="margin-top:6px;font-size:13.5px"></div>
 <div id="form" class="card" style="display:none">
   <label>Your name</label><input id="name" placeholder="e.g. Ramesh Kumar">
   <label>Mobile (optional)</label><input id="phone" inputmode="tel" placeholder="98765 43210">
@@ -455,6 +468,9 @@ button:disabled{opacity:.5}.big{font-size:44px;font-weight:800;color:var(--p)}.r
 const ID=${JSON.stringify(id)}, API='/api/v1/clinics/'+ID; let myTok=null;
 async function load(){try{const r=await fetch(API);const b=await r.json();if(!r.ok)throw 0;
 document.getElementById('clinic').textContent=b.clinic.name+(b.clinic.open_hours?' · '+b.clinic.open_hours:'');
+var ml=b.clinic.maps_link, addr=b.clinic.address;
+var href=(ml&&/^https?:\\/\\//i.test(ml))?ml:(addr?'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(addr):'');
+if(href){var dir=document.getElementById('dir');var a=document.createElement('a');a.href=href;a.target='_blank';a.rel='noopener';a.style.cssText='color:#6F73D2;font-weight:600;text-decoration:none';a.textContent='📍 Get directions';dir.appendChild(a);if(addr){var s=document.createElement('span');s.style.color='#5A6485';s.textContent=' · '+addr;dir.appendChild(s);}}
 document.getElementById('form').style.display=b.clinic.is_accepting?'block':'none';
 if(!b.clinic.is_accepting)document.getElementById('clinic').textContent+=' — not accepting bookings right now';
 }catch(e){document.getElementById('clinic').textContent='Clinic not found.';}}
@@ -474,5 +490,8 @@ load();
 });
 
 const port = process.env.PORT || 8787;
-app.listen(port, () => console.log(`CureSync parser on :${port} (model: ${MODEL})`));
+app.listen(port, () => {
+  console.log(`CureSync parser on :${port} (model: ${MODEL})`);
+  migrate();
+});
 
