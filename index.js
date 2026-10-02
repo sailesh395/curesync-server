@@ -312,6 +312,18 @@ app.post('/api/v1/prescriptions/parse-audio', requireAppKey, async (req, res) =>
 
 // ===================== Appointments (OPD token queue) =====================
 
+// Diagnostic: confirms the DB connection and returns the exact error if it fails. Safe to keep.
+app.get('/api/v1/dbcheck', requireAppKey, async (req, res) => {
+  const pool = db();
+  if (!pool) return res.json({ configured: false });
+  try {
+    const r = await pool.query('select current_user, current_database()');
+    res.json({ ok: true, user: r.rows[0].current_user, db: r.rows[0].current_database });
+  } catch (e) {
+    res.json({ ok: false, detail: e.message, code: e.code });
+  }
+});
+
 // Race-safe next-token insert: concurrent books may compute the same MAX+1, hitting the
 // unique(clinic_id, booking_date, token_number) constraint (23505) — retry a few times.
 async function bookToken(pool, clinicId, name, phone) {
